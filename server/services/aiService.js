@@ -1,17 +1,16 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const Groq = require("groq-sdk");
 
-const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
-const DEFAULT_GEMINI_MODELS = [
-  "gemini-2.0-flash",
-  "gemini-2.0-flash-lite",
-  "gemini-2.5-flash",
-];
+const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+const DEFAULT_GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
 const DISABLED_GEMINI_MODELS = new Set([
-  // Avoid known-invalid model id for current generateContent usage.
+  // Avoid known-invalid/retired model ids for current generateContent usage.
+  "gemini-2.0-flash",
   "gemini-1.5-flash",
 ]);
 
 let modelRotationIndex = 0;
+let groqModelRotationIndex = 0;
 
 const getGeminiModelName = () => {
   const configured = (process.env.GOOGLE_AI_MODEL || "").trim();
@@ -49,13 +48,50 @@ const getGeminiClient = () => {
   return new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY);
 };
 
+const DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant";
+const DEFAULT_GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
+
+const getGroqModelName = () => {
+  const configured = (process.env.GROQ_MODEL || "").trim();
+  return configured || DEFAULT_GROQ_MODEL;
+};
+
+const getGroqModelNames = () => {
+  const single = getGroqModelName();
+  const configuredList = String(process.env.GROQ_MODELS || "")
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
+
+  const ordered = unique([...configuredList, single, ...DEFAULT_GROQ_MODELS]);
+  return ordered.length ? ordered : [...DEFAULT_GROQ_MODELS];
+};
+
+const getGroqClient = () => {
+  if (!process.env.GROQ_API_KEY) {
+    return null;
+  }
+  return new Groq({ apiKey: process.env.GROQ_API_KEY });
+};
+
 const hasGeminiApiKey = () =>
   Boolean((process.env.GOOGLE_AI_API_KEY || "").trim());
+
+const hasGroqApiKey = () => Boolean((process.env.GROQ_API_KEY || "").trim());
+
+const hasAnyAIProviderKey = () => hasGeminiApiKey() || hasGroqApiKey();
 
 const getRotatedModelOrder = (names) => {
   if (!names.length) return [];
   const start = modelRotationIndex % names.length;
   modelRotationIndex = (modelRotationIndex + 1) % names.length;
+  return [...names.slice(start), ...names.slice(0, start)];
+};
+
+const getGroqRotatedModelOrder = (names) => {
+  if (!names.length) return [];
+  const start = groqModelRotationIndex % names.length;
+  groqModelRotationIndex = (groqModelRotationIndex + 1) % names.length;
   return [...names.slice(start), ...names.slice(0, start)];
 };
 
@@ -93,12 +129,85 @@ const generateWithGeminiModels = async (promptText, generationConfig) => {
   );
 };
 
-const generateWithAI = async (promptText, generationConfig = {}) => {
-  if (!hasGeminiApiKey()) {
+const mapToGroqModel = (modelName) => {
+  if (!modelName) return DEFAULT_GROQ_MODEL;
+  if (!modelName.includes("gemini")) return modelName;
+
+  // If env accidentally points to Gemini for Groq, fall back safely.
+  return DEFAULT_GROQ_MODEL;
+};
+
+const toGroqMaxTokens = (generationConfig = {}) => {
+  const v = Number(generationConfig?.maxOutputTokens);
+  if (!Number.isFinite(v) || v <= 0) return undefined;
+  return Math.max(256, Math.min(4000, Math.round(v)));
+};
+
+const generateWithGroqModels = async (promptText, generationConfig) => {
+  const client = getGroqClient();
+  if (!client) {
     return null;
   }
 
-  return generateWithGeminiModels(promptText, generationConfig);
+  const modelNames = getGroqModelNames().map(mapToGroqModel);
+  const orderedModels = getGroqRotatedModelOrder(modelNames);
+  let lastError;
+
+  for (const modelName of orderedModels) {
+    try {
+      const completion = await client.chat.completions.create({
+        model: modelName,
+        messages: [{ role: "user", content: promptText }],
+        temperature:
+          typeof generationConfig?.temperature === "number"
+            ? generationConfig.temperature
+            : 0.7,
+        max_tokens: toGroqMaxTokens(generationConfig),
+      });
+
+      const content = completion?.choices?.[0]?.message?.content;
+      if (!content || !String(content).trim()) {
+        throw new Error("Groq returned empty content.");
+      }
+      return String(content).trim();
+    } catch (error) {
+      lastError = error;
+      console.error(`Groq model ${modelName} failed:`, error.message);
+    }
+  }
+
+  throw createAIUnavailableError(
+    `All configured Groq models failed. (${lastError?.message || "unknown error"})`,
+  );
+};
+
+const generateWithAI = async (promptText, generationConfig = {}) => {
+  if (!hasAnyAIProviderKey()) {
+    return null;
+  }
+
+  // Primary: Gemini
+  if (hasGeminiApiKey()) {
+    try {
+      const geminiResponse = await generateWithGeminiModels(
+        promptText,
+        generationConfig,
+      );
+      if (geminiResponse) return geminiResponse;
+    } catch (error) {
+      console.error(
+        "Gemini provider failed, trying Groq fallback:",
+        error.message,
+      );
+    }
+  }
+
+  // Immediate fallback: Groq
+  if (hasGroqApiKey()) {
+    return generateWithGroqModels(promptText, generationConfig);
+  }
+
+  return null;
 };
 
 const stripMarkdownCodeFences = (text = "") => {
@@ -413,7 +522,12 @@ const INTERNAL_IMPROVEMENT_NOTES = new Set([
   "AI response parsing failed repeatedly, so fallback scoring was used.",
 ]);
 
-const normalizeEvaluationResult = (result, question, userAnswer) => {
+const normalizeEvaluationResult = (
+  result,
+  question,
+  userAnswer,
+  roundType = "technical",
+) => {
   const fallback = generateFallbackEvaluation(question, userAnswer);
   const isMCQ = question?.type === "mcq";
   const scoreValue = Number(result?.score);
@@ -457,18 +571,8 @@ const normalizeEvaluationResult = (result, question, userAnswer) => {
       : ["Use a clearer structure: key point, reasoning, example."]),
   ]).filter((item) => !INTERNAL_IMPROVEMENT_NOTES.has(item));
 
-  if (isMCQ) {
-    return {
-      score,
-      isCorrect:
-        typeof result?.isCorrect === "boolean" ? result.isCorrect : score >= 5,
-      feedback,
-      strengths: toCleanList(fallback.strengths),
-      improvements: toCleanList(fallback.improvements),
-    };
-  }
-
-  return {
+  // Base result object
+  const baseResult = {
     score,
     isCorrect:
       typeof result?.isCorrect === "boolean" ? result.isCorrect : score >= 5,
@@ -476,6 +580,110 @@ const normalizeEvaluationResult = (result, question, userAnswer) => {
     strengths,
     improvements,
   };
+
+  // For MCQ, return minimal result
+  if (isMCQ) {
+    return {
+      ...baseResult,
+      strengths: toCleanList(fallback.strengths),
+      improvements: toCleanList(fallback.improvements),
+    };
+  }
+
+  // Add round-specific fields
+  const roundSpecificFields = {};
+
+  if (roundType === "technical" && result?.subScores) {
+    roundSpecificFields.subScores = {
+      technicalAccuracy: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.technicalAccuracy) || 0),
+      ),
+      problemSolvingApproach: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.problemSolvingApproach) || 0),
+      ),
+      codeQuality: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.codeQuality) || 0),
+      ),
+      communicationClarity: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.communicationClarity) || 0),
+      ),
+    };
+  } else if (roundType === "managerial" && result?.subScores) {
+    roundSpecificFields.subScores = {
+      situationalJudgment: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.situationalJudgment) || 0),
+      ),
+      leadershipIndicators: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.leadershipIndicators) || 0),
+      ),
+      conflictResolution: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.conflictResolution) || 0),
+      ),
+      decisionMaking: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.decisionMaking) || 0),
+      ),
+    };
+    if (result?.starCompliance) {
+      roundSpecificFields.starCompliance = {
+        hasSituation: Boolean(result.starCompliance.hasSituation),
+        hasTask: Boolean(result.starCompliance.hasTask),
+        hasAction: Boolean(result.starCompliance.hasAction),
+        hasResult: Boolean(result.starCompliance.hasResult),
+        starScore: Math.max(
+          0,
+          Math.min(4, Number(result.starCompliance.starScore) || 0),
+        ),
+      };
+    }
+  } else if (roundType === "hr" && result?.subScores) {
+    roundSpecificFields.subScores = {
+      culturalFit: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.culturalFit) || 0),
+      ),
+      selfAwareness: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.selfAwareness) || 0),
+      ),
+      motivationClarity: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.motivationClarity) || 0),
+      ),
+      communicationStyle: Math.max(
+        0,
+        Math.min(10, Number(result.subScores.communicationStyle) || 0),
+      ),
+    };
+    if (result?.toneAnalysis) {
+      roundSpecificFields.toneAnalysis = String(result.toneAnalysis).trim();
+    }
+    if (Array.isArray(result?.greenFlags)) {
+      roundSpecificFields.greenFlags = toCleanList(result.greenFlags);
+    }
+  }
+
+  // Add common optional fields
+  if (Array.isArray(result?.redFlags)) {
+    roundSpecificFields.redFlags = toCleanList(result.redFlags);
+  }
+  if (Array.isArray(result?.followUpSuggestions)) {
+    roundSpecificFields.followUpSuggestions = toCleanList(
+      result.followUpSuggestions,
+    );
+  }
+  if (result?.idealAnswerHint) {
+    roundSpecificFields.idealAnswerHint = String(result.idealAnswerHint).trim();
+  }
+
+  return { ...baseResult, ...roundSpecificFields };
 };
 
 /**
@@ -488,7 +696,7 @@ const generateQuestions = async (
   count,
   userContext = "",
 ) => {
-  const hasAnyAIProvider = Boolean(getGeminiClient());
+  const hasAnyAIProvider = hasAnyAIProviderKey();
 
   if (!hasAnyAIProvider) {
     return generateFallbackQuestions(category, subcategory, difficulty, count);
@@ -559,10 +767,122 @@ Return ONLY the JSON array, no markdown or other text.`;
 };
 
 /**
- * Evaluate user's answer using AI
+ * Round-specific prompt builders
  */
-const evaluateAnswer = async (question, userAnswer, category) => {
-  const hasAnyAIProvider = hasGeminiApiKey();
+
+function buildTechnicalEvalPrompt(question, userAnswer) {
+  return `You are a senior software engineer conducting a technical interview.
+
+Question: "${question.question || question.questionText}"
+Expected Concepts: ${question.evaluationCriteria?.join(", ") || "N/A"}
+Difficulty: ${question.difficulty}
+Candidate Answer: "${userAnswer}"
+
+Evaluate strictly on technical merit. Return ONLY valid JSON:
+{
+  "score": <0-10>,
+  "subScores": {
+    "technicalAccuracy": <0-10>,
+    "problemSolvingApproach": <0-10>,
+    "codeQuality": <0-10>,
+    "communicationClarity": <0-10>
+  },
+  "verdict": "<Excellent|Good|Partial|Poor>",
+  "conceptsCovered": ["<concept1>", "<concept2>"],
+  "conceptsMissed": ["<concept1>", "<concept2>"],
+  "strengths": ["<specific strength>"],
+  "improvements": ["<specific gap with how to fix>"],
+  "redFlags": ["<e.g. mentioned O(n^2) without realizing there's O(n log n) solution>"],
+  "followUpSuggestions": ["<question an interviewer would naturally ask next>"],
+  "idealAnswerHint": "<2-3 sentence model answer outline>",
+  "feedback": "<3-5 sentence holistic evaluation>"
+}
+
+Return ONLY valid JSON, no markdown.`;
+}
+
+function buildManagerialEvalPrompt(question, userAnswer) {
+  return `You are a senior engineering manager conducting a leadership round interview.
+
+Question: "${question.question || question.questionText}"
+Candidate Answer: "${userAnswer}"
+
+Evaluate using the STAR method (Situation, Task, Action, Result).
+Look for: ownership mindset, leadership under ambiguity, conflict resolution ability,
+data-driven decisions, cross-functional collaboration, and team empathy.
+
+Return ONLY valid JSON:
+{
+  "score": <0-10>,
+  "subScores": {
+    "situationalJudgment": <0-10>,
+    "leadershipIndicators": <0-10>,
+    "conflictResolution": <0-10>,
+    "decisionMaking": <0-10>
+  },
+  "verdict": "<Excellent|Good|Partial|Poor>",
+  "starCompliance": {
+    "hasSituation": <true|false>,
+    "hasTask": <true|false>,
+    "hasAction": <true|false>,
+    "hasResult": <true|false>,
+    "starScore": <0-4>
+  },
+  "leadershipSignals": ["<positive signal observed>"],
+  "redFlags": ["<e.g. blamed team without taking ownership>"],
+  "strengths": ["<strength>"],
+  "improvements": ["<e.g. Answer lacked measurable outcome — add metrics>"],
+  "followUpSuggestions": ["<e.g. What would you do differently now?>"],
+  "feedback": "<3-5 sentences on overall leadership maturity shown>"
+}
+
+Return ONLY valid JSON, no markdown.`;
+}
+
+function buildHREvalPrompt(question, userAnswer) {
+  return `You are an experienced HR professional evaluating a candidate's soft skills
+and cultural fit.
+
+Question: "${question.question || question.questionText}"
+Candidate Answer: "${userAnswer}"
+
+Evaluate for: clarity of self-expression, genuine self-awareness, alignment with
+professional growth goals, communication maturity, and absence of red-flag responses
+(e.g. badmouthing previous employers, unrealistic salary expectations framing,
+vague non-answers).
+
+Return ONLY valid JSON:
+{
+  "score": <0-10>,
+  "subScores": {
+    "culturalFit": <0-10>,
+    "selfAwareness": <0-10>,
+    "motivationClarity": <0-10>,
+    "communicationStyle": <0-10>
+  },
+  "verdict": "<Excellent|Good|Partial|Poor>",
+  "toneAnalysis": "<Professional|Casual|Nervous|Overconfident|Balanced>",
+  "redFlags": ["<e.g. mentioned leaving previous job due to manager conflict without self-reflection>"],
+  "greenFlags": ["<e.g. demonstrated growth mindset with specific example>"],
+  "strengths": ["<strength>"],
+  "improvements": ["<e.g. 'Why this company' answer was generic — research the company>"],
+  "followUpSuggestions": ["<e.g. Can you tell me more about that project?>"],
+  "feedback": "<3-5 sentences focused on interpersonal and communication quality>"
+}
+
+Return ONLY valid JSON, no markdown.`;
+}
+
+/**
+ * Evaluate user's answer using AI (round-aware)
+ */
+const evaluateAnswer = async (
+  question,
+  userAnswer,
+  roundType = "technical",
+  category,
+) => {
+  const hasAnyAIProvider = hasAnyAIProviderKey();
 
   if (!userAnswer.trim()) {
     return generateFallbackEvaluation(question, userAnswer);
@@ -587,49 +907,28 @@ const evaluateAnswer = async (question, userAnswer, category) => {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      const prompt = `Evaluate this ${category} interview answer.
+      // Select prompt builder based on round type
+      const promptBuilders = {
+        technical: buildTechnicalEvalPrompt,
+        managerial: buildManagerialEvalPrompt,
+        hr: buildHREvalPrompt,
+      };
+      const builder = promptBuilders[roundType] || promptBuilders.technical;
+      const prompt = builder(question, userAnswer);
 
-Question: ${question.question || question.questionText}
-${question.correctAnswer ? `Expected Answer: ${question.correctAnswer}` : ""}
-${question.sampleAnswer ? `Sample Answer: ${question.sampleAnswer}` : ""}
-${question.evaluationCriteria?.length ? `Evaluation Criteria: ${question.evaluationCriteria.join(", ")}` : ""}
+      const systemPrompt =
+        roundType === "technical"
+          ? "You are a fair and constructive technical interview evaluator. Apply a clear rubric and explain the score.\n\nRubric (0-10 total):\n- Technical correctness: 0-3\n- Problem-solving approach: 0-3\n- Code quality and clarity: 0-2\n- Communication and explanation: 0-2\n\nRules:\n- Feedback must mention what was covered and what was missed.\n- Do not give generic praise.\n- Every improvement must be actionable and specific to this question.\n- Keep strengths/improvements concise and concrete."
+          : roundType === "managerial"
+            ? "You are evaluating managerial/leadership competencies. Be fair but exacting.\n\nCriteria:\n- STAR structure adherence (0-4):\n  S: Clear situation context\n  T: Defined task/problem\n  A: Specific actions taken\n  R: Measurable results\n- Leadership signals: ownership, bias for action, team empathy\n- Decision quality under ambiguity\n\nRules:\n- Leadership is shown through ownership, not blame-shifting.\n- Results must be specific and measurable.\n- Flag if candidate lacks STAR structure."
+            : "You are evaluating HR/soft skills competencies.\n\nCriteria:\n- Self-awareness: honest reflection on strengths and weaknesses\n- Professional communication: clarity, maturity, engagement\n- Cultural fit signals: values alignment, growth mindset, team mentality\n- Red flags: badmouthing, vagueness, unrealistic expectations\n\nRules:\n- Tone matters: professional, confident but not arrogant\n- Vague non-answers are red flags.\n- Blame-shifting indicates lower self-awareness.";
 
-Candidate's Answer: ${userAnswer}
-
-Evaluate and return a JSON object:
-{
-  "score": <number 0-10>,
-  "isCorrect": <boolean>,
-  "feedback": "Question-specific explanation with explicit reasons for the score",
-  "strengths": ["specific strength 1", "specific strength 2"],
-  "improvements": ["actionable improvement 1", "actionable improvement 2"],
-  "coveredConcepts": ["concept the candidate addressed"],
-  "missedConcepts": ["important concept not addressed"]
-}
-
-Return ONLY the JSON object.`;
-
-      const content = await generateWithAI(
-        `You are a fair and constructive interview evaluator. Apply a clear rubric and explain the score.
-
-Rubric (0-10 total):
-- Relevance to question: 0-3
-- Technical/behavioral correctness: 0-3
-- Depth and reasoning quality: 0-2
-- Clarity and structure: 0-2
-
-Rules:
-- Feedback must mention what was covered and what was missed.
-- Do not give generic praise.
-- Every improvement must be actionable and specific to this question.
-- Keep strengths/improvements concise and concrete.
-- Use plain, simple English with short sentences.
-
-${prompt}`,
-        { temperature: 0.3, maxOutputTokens: 1000 },
-      );
+      const content = await generateWithAI(systemPrompt + "\n\n" + prompt, {
+        temperature: 0.3,
+        maxOutputTokens: 1500,
+      });
       const parsed = parseAIJsonResponse(content, "object");
-      return normalizeEvaluationResult(parsed, question, userAnswer);
+      return normalizeEvaluationResult(parsed, question, userAnswer, roundType);
     } catch (error) {
       console.error(
         `AI Evaluation Error (attempt ${attempt}/${maxAttempts}):`,
@@ -658,52 +957,119 @@ ${prompt}`,
     },
     question,
     userAnswer,
+    roundType,
   );
 };
 
 /**
- * Generate overall interview feedback using AI
+ * Generate overall interview feedback using AI (round-aware)
  */
 const generateInterviewFeedback = async (interview) => {
-  const hasAnyAIProvider = Boolean(getGeminiClient());
+  const hasAnyAIProvider = hasAnyAIProviderKey();
 
   if (!hasAnyAIProvider) {
     return generateFallbackFeedback(interview);
   }
 
   try {
-    const answeredSummary = interview.answers
+    const {
+      roundType = "technical",
+      answers,
+      totalScore,
+      maxScore,
+      percentage,
+    } = interview;
+
+    const answeredSummary = answers
       .map(
         (a, i) =>
           `Q${i + 1}: ${a.questionText} | Score: ${a.score}/10 | ${a.skipped ? "Skipped" : "Answered"}`,
       )
       .join("\n");
 
-    const prompt = `Provide overall feedback for this ${interview.category} mock interview.
+    // Round-specific feedback context
+    const roundContext = {
+      technical: `Summarize technical depth, DSA/system design ability, and knowledge gaps.
+Highlight which core concepts were strong and which were weak.
+Give a hiring recommendation: Strong Hire / Hire / Maybe / No Hire.`,
+      managerial: `Summarize leadership maturity, STAR compliance rate across answers,
+conflict resolution style, and decision-making quality.
+Identify if candidate demonstrates individual contributor vs leadership mindset.
+Give a hiring recommendation for a team lead/managerial role.`,
+      hr: `Summarize communication quality, cultural alignment signals,
+self-awareness level, and overall professional maturity.
+Flag any concerning patterns (vague answers, blame-shifting, overconfidence).
+Give a cultural fit score and overall HR recommendation.`,
+    };
 
-Category: ${interview.category}
-Score: ${interview.totalScore}/${interview.maxScore} (${interview.percentage}%)
-Questions Answered: ${interview.questionsAnswered}/${interview.totalQuestions}
+    const commonRedFlags = [
+      ...new Set(answers.flatMap((a) => a.redFlags || [])),
+    ].slice(0, 5);
 
-Summary:
-${answeredSummary}
+    const prompt = `You are providing end-of-interview feedback for a completed ${roundType} interview.
 
-Return a JSON object:
+Overall Score: ${percentage}% (${interview.grade})
+Total Questions: ${answers.length}
+Skipped: ${answers.filter((a) => a.skipped).length}
+
+Per-question scores: ${answers.map((a) => a.score).join(", ")}
+${commonRedFlags.length > 0 ? `Common red flags: ${commonRedFlags.join("; ")}` : ""}
+
+${roundContext[roundType] || roundContext.technical}
+
+Return ONLY valid JSON:
 {
-  "overallFeedback": "Comprehensive paragraph of overall feedback",
-  "strengths": ["key strength 1", "key strength 2", "key strength 3"],
-  "areasForImprovement": ["improvement area 1", "improvement area 2"],
-  "recommendations": ["recommendation 1", "recommendation 2", "recommendation 3"]
+  "overallVerdict": "<Strong Hire|Hire|Maybe|No Hire>",
+  "executiveSummary": "<3 sentence summary a hiring manager would read>",
+  "topStrengths": ["<strength 1>", "<strength 2>", "<strength 3>"],
+  "criticalGaps": ["<gap 1>", "<gap 2>"],
+  "studyPlan": [
+    {
+      "topic": "<topic>",
+      "priority": "<High|Medium|Low>",
+      "resource": "<specific book/course/practice>"
+    }
+  ],
+  "nextStepAdvice": "<What the candidate should focus on before their next real interview>"
 }
 
-Return ONLY the JSON object.`;
+Return ONLY valid JSON, no markdown.`;
 
-    const content = await generateWithAI(
-      `You are a career coach providing constructive interview feedback.\n\n${prompt}`,
-      { temperature: 0.5, maxOutputTokens: 1000 },
-    );
+    const systemPrompt =
+      roundType === "technical"
+        ? "You are a senior technical hiring manager. Evaluate overall technical competency and provide actionable feedback."
+        : roundType === "managerial"
+          ? "You are a senior engineering leader. Evaluate leadership potential and readiness for people management roles."
+          : "You are an experienced HR partner. Evaluate cultural fit, soft skills, and professional maturity.";
+
+    const content = await generateWithAI(systemPrompt + "\n\n" + prompt, {
+      temperature: 0.5,
+      maxOutputTokens: 1500,
+    });
+
     if (!content) return generateFallbackFeedback(interview);
-    return parseAIJsonResponse(content, "object");
+
+    const parsed = parseAIJsonResponse(content, "object");
+
+    // Normalize the feedback response
+    return {
+      overallFeedback:
+        parsed?.executiveSummary ||
+        `Interview completed with a score of ${percentage}%.`,
+      overallVerdict: parsed?.overallVerdict || "",
+      executiveSummary: parsed?.executiveSummary || "",
+      strengths: toCleanList(parsed?.topStrengths),
+      topStrengths: toCleanList(parsed?.topStrengths),
+      areasForImprovement: toCleanList(parsed?.criticalGaps),
+      criticalGaps: toCleanList(parsed?.criticalGaps),
+      recommendations: toCleanList(parsed?.studyPlan?.map((sp) => sp?.topic)),
+      studyPlan: Array.isArray(parsed?.studyPlan)
+        ? parsed.studyPlan.filter(
+            (sp) => sp?.topic && sp?.priority && sp?.resource,
+          )
+        : [],
+      nextStepAdvice: parsed?.nextStepAdvice || "",
+    };
   } catch (error) {
     console.error("AI Feedback Error:", error.message);
     return generateFallbackFeedback(interview);
@@ -1451,9 +1817,58 @@ function generateFallbackFeedback(interview) {
   };
 }
 
+/**
+ * AI Transcript Correction - fixes misheard technical terms
+ */
+const correctTranscript = async (rawTranscript, questionContext = "") => {
+  const hasAnyAIProvider = hasAnyAIProviderKey();
+
+  if (!hasAnyAIProvider || !rawTranscript || !String(rawTranscript).trim()) {
+    return rawTranscript; // fallback to original if no AI or empty
+  }
+
+  try {
+    const prompt = `
+You are a transcript corrector for a technical interview system.
+The following text was captured via browser speech recognition and may contain
+errors especially in technical terms, jargon, and proper nouns.
+
+Interview Question Context: "${questionContext}"
+
+Raw Transcript: "${rawTranscript}"
+
+Fix ONLY clear speech recognition errors (e.g. "poly more fizz them" -> "polymorphism",
+"react hooks" capitalization, "big o" -> "Big O", "jay es" -> "JS").
+Do NOT rephrase, improve, or change the meaning.
+Do NOT fix grammar unless it is a clear recognition error.
+Return ONLY the corrected transcript text, nothing else. No markdown, no quotes.
+    `.trim();
+
+    const systemPrompt =
+      "You are a transcript error corrector. You fix speech recognition mistakes in technical contexts. " +
+      "You correct ONLY clear recognition errors, not grammar or style. " +
+      "Return ONLY the corrected text with no additional explanation.";
+
+    const content = await generateWithAI(prompt, {
+      systemPrompt,
+      temperature: 0.2,
+      maxOutputTokens: 500,
+    });
+
+    if (!content) return rawTranscript;
+
+    const corrected = String(content).trim();
+    return corrected || rawTranscript;
+  } catch (error) {
+    console.error("Transcript correction error:", error.message);
+    return rawTranscript; // fallback to original on error
+  }
+};
+
 module.exports = {
   generateQuestions,
   evaluateAnswer,
   generateInterviewFeedback,
+  correctTranscript,
   CATEGORY_PROMPTS,
 };

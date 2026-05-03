@@ -11,7 +11,6 @@ import {
   Send,
   SkipForward,
   CheckCircle,
-  Lightbulb,
   XCircle,
   Flag,
   Mic,
@@ -29,11 +28,11 @@ export default function InterviewSession() {
   const [questions, setQuestions] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [answer, setAnswer] = useState("");
+  const [editedTranscript, setEditedTranscript] = useState("");
   const [answers, setAnswers] = useState({});
   const [evaluations, setEvaluations] = useState({});
   const [submitting, setSubmitting] = useState(false);
   const [totalTimeLeft, setTotalTimeLeft] = useState(0);
-  const [showHints, setShowHints] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isMuted, setIsMuted] = useState(false);
@@ -234,33 +233,53 @@ export default function InterviewSession() {
       stopListening();
     }
 
-    const currentAnswer = answer || answers[currentQuestion._id] || "";
-    if (!currentAnswer.trim()) {
+    let finalAnswer =
+      editedTranscript || answer || answers[currentQuestion._id] || "";
+    if (!finalAnswer.trim()) {
       toast.error("Please provide an answer");
       return;
     }
 
     setSubmitting(true);
     try {
+      // AI correction pass if transcript was used
+      if (editedTranscript) {
+        try {
+          const { data: correctionData } = await interviewAPI.correctTranscript(
+            editedTranscript,
+            currentQuestion.question,
+          );
+          if (correctionData.corrected) {
+            finalAnswer = correctionData.corrected;
+          }
+        } catch (correctionError) {
+          // fallback to uncorrected transcript if correction fails
+          console.error(
+            "Transcript correction failed, using original",
+            correctionError,
+          );
+        }
+      }
+
       const { data } = await interviewAPI.submitAnswer(id, {
         questionId: currentQuestion._id,
-        answer: currentAnswer,
+        answer: finalAnswer,
         timeSpent: 0, // Time tracking handled at interview level
       });
 
-      setAnswers((prev) => ({ ...prev, [currentQuestion._id]: currentAnswer }));
+      setAnswers((prev) => ({ ...prev, [currentQuestion._id]: finalAnswer }));
       setEvaluations((prev) => ({
         ...prev,
         [currentQuestion._id]: data.evaluation,
       }));
       setAnswer("");
+      setEditedTranscript("");
       stopListening();
       resetTranscript();
 
       // All categories: no per-question feedback, auto-advance
       if (!isLastQuestion) {
         setCurrentIndex((prev) => prev + 1);
-        setShowHints(false);
       }
     } catch (error) {
       toast.error(error.response?.data?.message || "Failed to submit answer");
@@ -297,7 +316,6 @@ export default function InterviewSession() {
       setAnswer("");
       stopListening();
       resetTranscript();
-      setShowHints(false);
     }
   };
 
@@ -307,7 +325,6 @@ export default function InterviewSession() {
       setAnswer("");
       stopListening();
       resetTranscript();
-      setShowHints(false);
     }
   };
 
@@ -506,12 +523,24 @@ export default function InterviewSession() {
             {/* Open-ended answer with Speech-to-Text */}
             {currentQuestion.type !== "mcq" && (
               <>
+                {/* Editable Textarea */}
                 <textarea
                   ref={textareaRef}
-                  value={answer || answers[currentQuestion._id] || ""}
-                  onChange={(e) => setAnswer(e.target.value)}
+                  value={
+                    editedTranscript ||
+                    answer ||
+                    answers[currentQuestion._id] ||
+                    ""
+                  }
+                  onChange={(e) => {
+                    if (editedTranscript || !answer) {
+                      setEditedTranscript(e.target.value);
+                    } else {
+                      setAnswer(e.target.value);
+                    }
+                  }}
                   disabled={!!hasEvaluation}
-                  placeholder="Type your answer here or use the microphone button to speak..."
+                  placeholder="Your answer will appear here. You can edit before submitting."
                   className="input-field min-h-[160px] resize-y mb-4"
                   rows={6}
                 />
@@ -555,30 +584,6 @@ export default function InterviewSession() {
                   </div>
                 )}
               </>
-            )}
-
-            {/* Hints */}
-            {currentQuestion.hints?.length > 0 && !hasEvaluation && (
-              <div className="mb-4">
-                <button
-                  onClick={() => setShowHints(!showHints)}
-                  className="btn-ghost text-sm text-amber-600 dark:text-amber-400"
-                >
-                  <Lightbulb className="w-4 h-4 mr-1" />
-                  {showHints ? "Hide Hints" : "Show Hints"}
-                </button>
-                {showHints && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: "auto" }}
-                    className="mt-2 p-4 rounded-xl bg-amber-50 dark:bg-amber-950/20 text-sm text-amber-800 dark:text-amber-200"
-                  >
-                    {currentQuestion.hints.map((hint, i) => (
-                      <p key={i}>💡 {hint}</p>
-                    ))}
-                  </motion.div>
-                )}
-              </div>
             )}
 
             {/* Action buttons */}
@@ -633,9 +638,9 @@ export default function InterviewSession() {
               onClick={() => {
                 setCurrentIndex(i);
                 setAnswer("");
+                setEditedTranscript("");
                 stopListening();
                 resetTranscript();
-                setShowHints(false);
               }}
               className={`w-3 h-3 rounded-full transition-all ${
                 i === currentIndex

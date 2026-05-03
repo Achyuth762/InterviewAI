@@ -52,6 +52,9 @@ const questionCounts = [5, 10, 15, 20];
 export default function InterviewSetup() {
   const navigate = useNavigate();
   const [categories, setCategories] = useState([]);
+  const [branches, setBranches] = useState([]);
+  const [branchRequiredFor, setBranchRequiredFor] = useState([]);
+  const [selectedBranch, setSelectedBranch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("");
   const [selectedSubcategories, setSelectedSubcategories] = useState([
     "general",
@@ -65,6 +68,8 @@ export default function InterviewSetup() {
       try {
         const { data } = await questionAPI.getCategories();
         setCategories(data.categories);
+        setBranches(data.branches || []);
+        setBranchRequiredFor(data.branchRequiredFor || []);
       } catch (error) {
         console.error("Failed to fetch categories:", error);
       }
@@ -73,26 +78,53 @@ export default function InterviewSetup() {
   }, []);
 
   const selectedCatData = categories.find((c) => c.id === selectedCategory);
+  const branchNeeded = branchRequiredFor.length
+    ? branchRequiredFor.includes(selectedCategory)
+    : branches.length > 0;
 
   const handleStart = async () => {
     if (!selectedCategory) {
       toast.error("Please select a category");
       return;
     }
+    if (branchNeeded && !selectedBranch) {
+      toast.error("Please select your branch");
+      return;
+    }
     setLoading(true);
     try {
+      // Map category to roundType
+      const roundTypeMap = {
+        technical: "technical",
+        hr: "hr",
+        managerial: "managerial",
+        aptitude: "technical", // fallback for aptitude
+      };
+
       const { data } = await interviewAPI.start({
         category: selectedCategory,
         subcategory: selectedSubcategories.join(","),
+        branch: selectedBranch || undefined,
         difficulty,
         questionCount,
+        roundType: roundTypeMap[selectedCategory],
       });
       // Navigate to media permissions before starting interview
       navigate("/media-permissions", {
         state: { interviewId: data.interview._id },
       });
     } catch (error) {
-      toast.error(error.response?.data?.message || "Failed to start interview");
+      const status = error.response?.status;
+      if (status === 403) {
+        toast.error(
+          error.response?.data?.message ||
+            "This branch is not suitable for mock interviews.",
+        );
+      } else {
+        toast.error(
+          error.response?.data?.message || "Failed to start interview",
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -109,6 +141,32 @@ export default function InterviewSetup() {
           Configure your interview session below.
         </p>
       </motion.div>
+
+      {/* Branch Selection */}
+      {branches.length > 0 && (
+        <div>
+          <h2 className="text-lg font-semibold mb-4">Select Branch</h2>
+          <div className="max-w-md">
+            <select
+              value={selectedBranch}
+              onChange={(event) => setSelectedBranch(event.target.value)}
+              className="w-full rounded-xl border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-900 px-4 py-3 text-sm text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-primary-500"
+            >
+              <option value="" disabled>
+                Select your branch
+              </option>
+              {branches.map((branch) => (
+                <option key={branch.id} value={branch.id}>
+                  {branch.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <p className="text-xs text-[var(--color-text-tertiary)] mt-2">
+            Only computer science related branches can take mock interviews.
+          </p>
+        </div>
+      )}
 
       {/* Category Selection */}
       <div>
@@ -243,7 +301,7 @@ export default function InterviewSetup() {
       >
         <button
           onClick={handleStart}
-          disabled={!selectedCategory || loading}
+          disabled={!selectedCategory || (branchNeeded && !selectedBranch) || loading}
           className="btn-primary w-full sm:w-auto text-base py-4 px-10"
         >
           {loading ? (

@@ -10,8 +10,26 @@ const {
 const normalizeQuestionText = (text = "") =>
   String(text).replace(/\s+/g, " ").trim().toLowerCase();
 
-const uniqueQuestionsByText = (items = []) => {
-  const seen = new Set();
+const normalizeBranch = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase();
+
+const buildBranchQuery = (branch) => {
+  if (!branch) return {};
+  return {
+    $or: [
+      { branch },
+      { branch: "general" },
+      { branch: { $exists: false } },
+      { branch: "" },
+      { branch: null },
+    ],
+  };
+};
+
+const uniqueQuestionsByText = (items = [], blockedSet = new Set()) => {
+  const seen = new Set(blockedSet);
   return items.filter((q) => {
     const key = normalizeQuestionText(q?.question);
     if (!key || seen.has(key)) return false;
@@ -24,8 +42,51 @@ const uniqueQuestionsByText = (items = []) => {
 // @route   POST /api/interviews/start
 const startInterview = async (req, res, next) => {
   try {
-    const { category, subcategory, difficulty, questionCount } = req.body;
+    const {
+      category,
+      subcategory,
+      difficulty,
+      questionCount,
+      roundType,
+      branch,
+    } = req.body;
     const userId = req.user._id;
+    const normalizedBranch = normalizeBranch(branch);
+    const effectiveBranch = normalizedBranch || "general";
+
+    if (!normalizedBranch) {
+      return res.status(400).json({
+        message: "Please select your branch before starting the interview.",
+      });
+    }
+
+    const eligibleBranches = new Set([
+      "cs",
+      "it",
+      "software",
+      "computer-engineering",
+      "ai-ml",
+      "data-science",
+      "cybersecurity",
+      "information-systems",
+    ]);
+
+    if (!eligibleBranches.has(normalizedBranch)) {
+      return res.status(403).json({
+        message: "Only computer science related branches can take mock interviews.",
+      });
+    }
+
+    // Infer roundType from category if not provided
+    const effectiveRoundType =
+      roundType ||
+      (category === "technical"
+        ? "technical"
+        : category === "managerial"
+          ? "managerial"
+          : category === "hr"
+            ? "hr"
+            : "technical");
 
     // Check for existing in-progress interview
     const existing = await Interview.findOne({
@@ -40,10 +101,37 @@ const startInterview = async (req, res, next) => {
       });
     }
 
+    // ... rest of question generation logic stays the same until Interview.create ...
+
     // Generate questions (AI or fallback)
-    const userContext = req.user.profile
+    const profileContext = req.user.profile
       ? `Experience: ${req.user.profile.experience}, Skills: ${(req.user.profile.skills || []).join(", ")}, Target Role: ${req.user.profile.targetRole}`
       : "";
+    const branchContext = normalizedBranch ? `Branch: ${normalizedBranch}` : "";
+    const userContext = [profileContext, branchContext]
+      .filter(Boolean)
+      .join(" | ");
+
+    // Prevent repeating questions across previous interviews for this user.
+    const previousInterviews = await Interview.find({
+      user: userId,
+      category,
+      ...(normalizedBranch ? { branch: normalizedBranch } : {}),
+    }).select("answers.question answers.questionText");
+
+    const usedQuestionIds = new Set();
+    const usedQuestionTexts = new Set();
+
+    previousInterviews.forEach((prev) => {
+      (prev.answers || []).forEach((answer) => {
+        if (answer.question) {
+          usedQuestionIds.add(answer.question.toString());
+        }
+        if (answer.questionText) {
+          usedQuestionTexts.add(normalizeQuestionText(answer.questionText));
+        }
+      });
+    });
 
     // Support multiple subcategories (comma-separated)
     const subcategories = (subcategory || "general")
@@ -82,8 +170,8 @@ const startInterview = async (req, res, next) => {
       questions.sort(() => Math.random() - 0.5);
     }
 
-    // Enforce uniqueness first, then backfill until target count.
-    questions = uniqueQuestionsByText(questions);
+    // Enforce uniqueness and filter out previously used question text.
+    questions = uniqueQuestionsByText(questions, usedQuestionTexts);
 
     let refillAttempts = 0;
     while (questions.length < totalCount && refillAttempts < 5) {
@@ -97,13 +185,25 @@ const startInterview = async (req, res, next) => {
         needed + 3,
         userContext,
       );
-      questions = uniqueQuestionsByText([...questions, ...extra]);
+      questions = uniqueQuestionsByText(
+        [...questions, ...extra],
+        usedQuestionTexts,
+      );
       refillAttempts += 1;
     }
 
     // Final top-up from existing DB questions to avoid short sessions.
     if (questions.length < totalCount) {
-      const existingPool = await Question.find({ category })
+      const existingPoolQuery = {
+        category,
+        ...buildBranchQuery(normalizedBranch),
+      };
+
+      if (usedQuestionIds.size > 0) {
+        existingPoolQuery._id = { $nin: Array.from(usedQuestionIds) };
+      }
+
+      const existingPool = await Question.find(existingPoolQuery)
         .select(
           "question type options correctAnswer sampleAnswer evaluationCriteria hints timeLimit points category subcategory difficulty isAIGenerated",
         )
@@ -111,16 +211,19 @@ const startInterview = async (req, res, next) => {
         .limit(200)
         .lean();
 
-      questions = uniqueQuestionsByText([
-        ...questions,
-        ...existingPool.map((q) => ({
-          ...q,
-          category,
-          subcategory: q.subcategory || subcategories[0] || "general",
-          difficulty: q.difficulty || effectiveDifficulty,
-          isAIGenerated: Boolean(q.isAIGenerated),
-        })),
-      ]);
+      questions = uniqueQuestionsByText(
+        [
+          ...questions,
+          ...existingPool.map((q) => ({
+            ...q,
+            category,
+            subcategory: q.subcategory || subcategories[0] || "general",
+            difficulty: q.difficulty || effectiveDifficulty,
+            isAIGenerated: Boolean(q.isAIGenerated),
+          })),
+        ],
+        usedQuestionTexts,
+      );
     }
 
     if (questions.length > totalCount) {
@@ -141,12 +244,13 @@ const startInterview = async (req, res, next) => {
       if (q.isAIGenerated) {
         savedQ = await Question.create({
           ...q,
+          branch: effectiveBranch,
           usageCount: 1,
         });
       } else {
         savedQ = await Question.findOneAndUpdate(
-          { question: q.question, category },
-          { ...q, $inc: { usageCount: 1 } },
+          { question: q.question, category, branch: effectiveBranch },
+          { ...q, branch: effectiveBranch, $inc: { usageCount: 1 } },
           { upsert: true, new: true },
         );
       }
@@ -171,6 +275,8 @@ const startInterview = async (req, res, next) => {
     const interview = await Interview.create({
       user: userId,
       category,
+      branch: effectiveBranch,
+      roundType: effectiveRoundType,
       subcategory: subcategory || "general",
       difficulty,
       totalQuestions: savedQuestions.length,
@@ -188,6 +294,8 @@ const startInterview = async (req, res, next) => {
       interview: {
         _id: interview._id,
         category: interview.category,
+        branch: interview.branch,
+        roundType: interview.roundType,
         subcategory: interview.subcategory,
         difficulty: interview.difficulty,
         totalQuestions: interview.totalQuestions,
@@ -245,10 +353,15 @@ const submitAnswer = async (req, res, next) => {
       return res.status(404).json({ message: "Question not found" });
     }
 
-    // Evaluate the answer
+    // Evaluate the answer (pass roundType)
     let evaluation;
     try {
-      evaluation = await evaluateAnswer(question, answer, interview.category);
+      evaluation = await evaluateAnswer(
+        question,
+        answer,
+        interview.roundType,
+        interview.category,
+      );
     } catch (error) {
       if (error.name === "AIUnavailableError") {
         return res.status(503).json({
@@ -259,7 +372,7 @@ const submitAnswer = async (req, res, next) => {
       throw error;
     }
 
-    // Update the answer
+    // Update the answer with all evaluation results
     interview.answers[answerIndex].userAnswer = answer;
     interview.answers[answerIndex].score = evaluation.score;
     interview.answers[answerIndex].isCorrect = evaluation.isCorrect;
@@ -268,6 +381,31 @@ const submitAnswer = async (req, res, next) => {
     interview.answers[answerIndex].improvements = evaluation.improvements || [];
     interview.answers[answerIndex].timeSpent = timeSpent || 0;
     interview.answers[answerIndex].skipped = !answer || !answer.trim();
+
+    // Store round-specific fields
+    if (evaluation.subScores) {
+      interview.answers[answerIndex].subScores = evaluation.subScores;
+    }
+    if (evaluation.redFlags) {
+      interview.answers[answerIndex].redFlags = evaluation.redFlags;
+    }
+    if (evaluation.greenFlags) {
+      interview.answers[answerIndex].greenFlags = evaluation.greenFlags;
+    }
+    if (evaluation.starCompliance) {
+      interview.answers[answerIndex].starCompliance = evaluation.starCompliance;
+    }
+    if (evaluation.toneAnalysis) {
+      interview.answers[answerIndex].toneAnalysis = evaluation.toneAnalysis;
+    }
+    if (evaluation.followUpSuggestions) {
+      interview.answers[answerIndex].followUpSuggestions =
+        evaluation.followUpSuggestions;
+    }
+    if (evaluation.idealAnswerHint) {
+      interview.answers[answerIndex].idealAnswerHint =
+        evaluation.idealAnswerHint;
+    }
 
     interview.questionsAnswered = interview.answers.filter(
       (a) => a.userAnswer || a.skipped,
@@ -282,14 +420,39 @@ const submitAnswer = async (req, res, next) => {
 
     await interview.save();
 
+    // Build evaluation response - include round-specific fields for frontend display
+    const evaluationResponse = {
+      score: evaluation.score,
+      isCorrect: evaluation.isCorrect,
+      feedback: evaluation.feedback,
+      strengths: evaluation.strengths,
+      improvements: evaluation.improvements,
+    };
+
+    if (evaluation.subScores) {
+      evaluationResponse.subScores = evaluation.subScores;
+    }
+    if (evaluation.redFlags) {
+      evaluationResponse.redFlags = evaluation.redFlags;
+    }
+    if (evaluation.greenFlags) {
+      evaluationResponse.greenFlags = evaluation.greenFlags;
+    }
+    if (evaluation.starCompliance) {
+      evaluationResponse.starCompliance = evaluation.starCompliance;
+    }
+    if (evaluation.toneAnalysis) {
+      evaluationResponse.toneAnalysis = evaluation.toneAnalysis;
+    }
+    if (evaluation.followUpSuggestions) {
+      evaluationResponse.followUpSuggestions = evaluation.followUpSuggestions;
+    }
+    if (evaluation.idealAnswerHint) {
+      evaluationResponse.idealAnswerHint = evaluation.idealAnswerHint;
+    }
+
     res.json({
-      evaluation: {
-        score: evaluation.score,
-        isCorrect: evaluation.isCorrect,
-        feedback: evaluation.feedback,
-        strengths: evaluation.strengths,
-        improvements: evaluation.improvements,
-      },
+      evaluation: evaluationResponse,
       progress: {
         answered: interview.questionsAnswered,
         total: interview.totalQuestions,
@@ -334,12 +497,32 @@ const completeInterview = async (req, res, next) => {
       (interview.completedAt - interview.startedAt) / 1000,
     );
 
-    // Generate overall feedback
+    // Generate overall feedback (pass roundType from interview)
     const feedback = await generateInterviewFeedback(interview);
     interview.overallFeedback = feedback.overallFeedback;
     interview.strengths = feedback.strengths;
     interview.areasForImprovement = feedback.areasForImprovement;
     interview.recommendations = feedback.recommendations;
+
+    // Store extended feedback fields
+    if (feedback.overallVerdict) {
+      interview.overallVerdict = feedback.overallVerdict;
+    }
+    if (feedback.executiveSummary) {
+      interview.executiveSummary = feedback.executiveSummary;
+    }
+    if (feedback.topStrengths) {
+      interview.topStrengths = feedback.topStrengths;
+    }
+    if (feedback.criticalGaps) {
+      interview.criticalGaps = feedback.criticalGaps;
+    }
+    if (feedback.studyPlan && Array.isArray(feedback.studyPlan)) {
+      interview.studyPlan = feedback.studyPlan;
+    }
+    if (feedback.nextStepAdvice) {
+      interview.nextStepAdvice = feedback.nextStepAdvice;
+    }
 
     await interview.save();
 
@@ -465,6 +648,39 @@ const getInterviews = async (req, res, next) => {
   }
 };
 
+// @desc    Correct speech-to-text transcript using AI
+// @route   POST /api/interviews/correct-transcript
+const correctTranscript = async (req, res, next) => {
+  try {
+    const { transcript, context } = req.body;
+
+    if (!transcript || !String(transcript).trim()) {
+      return res.status(400).json({
+        message: "Transcript is required",
+        corrected: "",
+      });
+    }
+
+    const corrected = await aiService.correctTranscript(
+      String(transcript).trim(),
+      String(context || "").trim(),
+    );
+
+    res.json({
+      success: true,
+      corrected: corrected || transcript,
+    });
+  } catch (error) {
+    console.error("Transcript correction error:", error);
+    // Fallback: return original transcript
+    res.json({
+      success: false,
+      corrected: req.body.transcript || "",
+      message: "Correction failed, using original transcript",
+    });
+  }
+};
+
 module.exports = {
   startInterview,
   submitAnswer,
@@ -472,4 +688,5 @@ module.exports = {
   abandonInterview,
   getInterview,
   getInterviews,
+  correctTranscript,
 };

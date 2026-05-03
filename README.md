@@ -44,7 +44,7 @@ A production-ready, full-stack MERN application for AI-powered mock interview pr
 | Frontend | React 18, Vite, Tailwind CSS, Framer Motion, Recharts             |
 | Backend  | Node.js, Express.js                                               |
 | Database | MongoDB Atlas with Mongoose                                       |
-| AI       | Google Gemini API (`GOOGLE_AI_MODEL`, default `gemini-2.0-flash`) |
+| AI       | Google Gemini API (`GOOGLE_AI_MODEL`, default `gemini-2.5-flash`) |
 | Auth     | Google OAuth 2.0 (`@react-oauth/google`), JWT                     |
 | Media    | Web Speech API, `navigator.mediaDevices.getUserMedia`             |
 | Design   | Apple + Anthropic inspired minimal dark/light UI                  |
@@ -84,7 +84,7 @@ npm run dev
 | ----------------------- | ------ | ------------------------------------------------ |
 | `MONGODB_URI`           | server | MongoDB connection string                        |
 | `GOOGLE_AI_API_KEY`     | server | Gemini API key                                   |
-| `GOOGLE_AI_MODEL`       | server | Gemini model name (default: `gemini-2.0-flash`)  |
+| `GOOGLE_AI_MODEL`       | server | Gemini model name (default: `gemini-2.5-flash`)  |
 | `GOOGLE_AI_MODELS`      | server | Comma-separated model list for rotation/failover |
 | `GOOGLE_CLIENT_ID`      | server | Google OAuth client ID                           |
 | `JWT_SECRET`            | server | Secret for signing JWT tokens                    |

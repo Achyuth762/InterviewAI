@@ -66,7 +66,10 @@ app.get("/api/health", (req, res) => {
     status: "ok",
     timestamp: new Date().toISOString(),
     ai: {
-      configured: Boolean(process.env.GOOGLE_AI_API_KEY),
+      configured: Boolean(
+        (process.env.GOOGLE_AI_API_KEY || "").trim() ||
+        (process.env.GROQ_API_KEY || "").trim(),
+      ),
     },
   });
 });

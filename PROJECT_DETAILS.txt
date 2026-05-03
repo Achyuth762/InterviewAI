@@ -1,0 +1,346 @@
+AI Mock Interview System - Technical Inventory
+
+Generated: March 29, 2026
+
+1) Architecture Overview
+- Stack: MERN (MongoDB, Express, React, Node.js)
+- Frontend: React 18 + Vite + Tailwind CSS + Framer Motion + Recharts
+- Backend: Node.js + Express + MongoDB + Google Generative AI (Gemini)
+- Auth: JWT + Google OAuth 2.0
+- Core flow: Authentication -> Interview Setup -> Media Permissions -> Interview Session -> AI Evaluation -> Results/Analytics
+
+2) Project Structure
+- client/: React application (UI, routing, contexts, hooks, services)
+- server/: Express API (routes, controllers, models, middleware, validators, AI service)
+- package.json: root scripts for install/dev/build/seed/lint
+- README.md: product and setup overview
+
+3) Root Scripts and Tooling
+From package.json:
+- install:all -> installs root, server, and client dependencies
+- dev -> runs server and client concurrently
+- dev:server -> starts server dev mode
+- dev:client -> starts client dev mode
+- build -> builds client
+- start -> starts server
+- seed -> runs server seed script
+- lint/lint:fix -> lint both server and client
+
+4) Frontend (client)
+4.1) Entry and App Wiring
+- client/src/main.jsx
+  - Provider order: GoogleOAuthProvider -> BrowserRouter -> ThemeProvider -> MediaProvider -> AuthProvider -> App
+  - Toaster integrated globally
+- client/src/App.jsx
+  - Public routes: /, /login, /register
+  - Protected routes: /dashboard, /interview/setup, /media-permissions, /interview/:id, /interview/:id/result, /history, /analytics, /leaderboard, /profile, /settings
+
+4.2) Contexts
+- client/src/contexts/AuthContext.jsx
+  - Manages user/token/loading state
+  - Methods: login, register, googleLogin, logout, updateUser
+  - Persists token and restores auth state on startup
+- client/src/contexts/MediaContext.jsx
+  - Manages shared camera/mic stream and permission state
+  - Methods: requestPermissions, stopStream
+- client/src/contexts/ThemeContext.jsx
+  - Manages light/dark/system theme
+  - Persists preference and responds to system setting changes
+
+4.3) Hooks
+- client/src/hooks/useMediaPermissions.js
+  - Requests camera + microphone
+  - Handles recording lifecycle (start/stop) and blob output
+  - Tracks permission/device errors
+- client/src/hooks/useSpeechToText.js
+  - Wraps Web Speech API for transcript capture
+  - Exposes: transcript, interimTranscript, isListening, isSupported, error, startListening, stopListening, resetTranscript
+
+4.4) Components
+- client/src/components/MediaDisplay.jsx
+  - Renders live video preview, recording indicator, mute/unmute, and no-camera fallback UI
+- client/src/components/layout/Layout.jsx
+  - Protected app shell with sidebar/topbar and routed content area
+- client/src/components/layout/Sidebar.jsx, TopBar.jsx
+  - Navigation + top actions
+
+4.5) Pages
+- Landing.jsx: marketing/home with CTA
+- Login.jsx/Register.jsx: auth and Google sign-in
+- Dashboard.jsx: interview summary cards and quick actions
+- InterviewSetup.jsx: category, subcategory, difficulty, question count configuration
+- MediaPermissions.jsx: pre-session camera/mic grant and preview
+- InterviewSession.jsx: live Q&A, speech-to-text input, timing, submit/skip
+- InterviewResult.jsx: score, grade, per-question feedback, recommendations
+- History.jsx: interview history listing and filtering
+- Analytics.jsx: charts for trends and category performance
+- Leaderboard.jsx: ranked users view
+- Profile.jsx: profile details/preferences
+- Settings.jsx: app preferences and account-level settings
+
+4.6) API Service Layer
+- client/src/services/api.js
+  - Axios base URL: /api
+  - Request interceptor injects Authorization: Bearer <token>
+  - Response interceptor handles 401 by clearing auth and redirecting to login
+  - Groups: authAPI, interviewAPI, questionAPI, userAPI, analyticsAPI, leaderboardAPI
+
+5) Backend (server)
+5.1) Server Startup and Middleware
+- server/server.js
+  - Loads env
+  - Connects DB
+  - Security middleware: helmet, mongo sanitize, cors, rate limiting
+  - Parsers: express.json/urlencoded
+  - Logging: morgan in dev
+  - Mounts routes at /api/*
+  - Health endpoint: GET /api/health
+  - Not-found + centralized error handling middleware
+
+5.2) Database
+- server/config/db.js
+  - Mongoose connection via MONGODB_URI
+  - Logs success host and exits process on failure
+
+5.3) Models
+- server/models/User.js
+  - Fields: name, email, password, googleId, authProvider, avatar, role, profile, preferences, stats
+  - Password hashed with bcrypt pre-save
+  - comparePassword method
+  - toJSON strips password
+  - Indexes on email and googleId
+- server/models/Interview.js
+  - Tracks interview lifecycle: in-progress/completed/abandoned
+  - Stores answers array with score/feedback/strengths/improvements/timeSpent/skipped
+  - Stores totals: totalScore/maxScore/percentage/grade
+  - calculateGrade method maps percentage to letter grade
+  - Indexes for user/category/status/history queries
+- server/models/Question.js
+  - Fields: category, subcategory, difficulty, type, question, options, correctAnswer, sampleAnswer, evaluationCriteria, hints, points, tags, usageCount, isAIGenerated
+  - Category/difficulty and tags indexing for retrieval
+
+5.4) Route Definitions
+- server/routes/authRoutes.js
+  - POST /api/auth/register
+  - POST /api/auth/login
+  - POST /api/auth/google
+  - GET /api/auth/me
+- server/routes/interviewRoutes.js
+  - GET /api/interviews
+  - POST /api/interviews/start
+  - GET /api/interviews/:id
+  - POST /api/interviews/:id/answer
+  - POST /api/interviews/:id/complete
+  - POST /api/interviews/:id/abandon
+- server/routes/questionRoutes.js
+  - GET /api/questions/categories
+  - GET /api/questions
+  - GET /api/questions/:id
+- server/routes/userRoutes.js
+  - GET /api/users/profile
+  - PUT /api/users/profile
+  - PUT /api/users/password
+  - DELETE /api/users/account
+- server/routes/analyticsRoutes.js
+  - GET /api/analytics
+- server/routes/leaderboardRoutes.js
+  - GET /api/leaderboard
+
+5.5) Controllers
+- server/controllers/authController.js
+  - Register/login/google auth and current-user lookup
+- server/controllers/interviewController.js
+  - startInterview:
+    - Enforces only one in-progress interview per user
+    - Supports multi-subcategory generation
+    - Uses AI service; falls back to DB when needed
+    - Deduplicates questions and retries fill to exact requested count
+    - Can return 503 when exact count cannot be met
+  - submitAnswer:
+    - Validates in-progress state
+    - Evaluates answer via AI service
+    - Saves per-question score/feedback and updates progress
+  - completeInterview:
+    - Finalizes status, percentage, grade
+    - Generates overall interview feedback
+    - Updates user aggregate stats
+  - abandonInterview:
+    - Marks abandoned and records duration
+  - getInterview/getInterviews:
+    - Single interview details and paginated history
+- server/controllers/questionController.js
+  - Category metadata
+  - Filtered paginated question retrieval
+  - Single-question lookup
+- server/controllers/userController.js
+  - Profile read/update, password change, account delete
+- server/controllers/analyticsController.js
+  - Returns overview, category stats, recent performance, weekly progress, difficulty distribution
+- server/controllers/leaderboardController.js
+  - Top users ranking and current user rank
+
+5.6) Middleware
+- server/middleware/authMiddleware.js
+  - protect: JWT verification and req.user assignment
+  - admin: role guard
+- server/middleware/errorMiddleware.js
+  - notFound and normalized API error responses
+  - Handles Mongoose cast/validation, duplicate keys, JWT errors
+
+5.7) Validators
+- server/validators/validators.js
+  - Joi schemas for: register, login, updateProfile, startInterview, submitAnswer, changePassword
+  - validate(schema) middleware returns 400 on invalid payloads
+
+5.8) AI Service
+- server/services/aiService.js
+  - Integrates Google Generative AI
+  - Model rotation/fallback among configured models
+  - JSON parsing + normalization for AI responses
+  - generateQuestions:
+    - Category/difficulty-aware prompting
+    - Technical interview constraints for verbal response suitability
+    - Optional user context insertion
+    - Deterministic fallback question pools if AI unavailable
+  - evaluateAnswer:
+    - AI scoring and qualitative feedback
+    - Score normalization and concept coverage analysis
+    - Fallback keyword-based scoring without AI
+  - generateInterviewFeedback:
+    - Summarizes strengths, improvement areas, recommendations
+    - Deterministic fallback summary if needed
+
+5.9) Seed Data
+- server/seed/seedData.js
+  - Clears and seeds User + Question collections
+  - Creates demo account (demo@example.com / demo1234)
+  - Inserts sample questions across categories/subcategories
+
+6) API Endpoints (Summary)
+Auth:
+- POST /api/auth/register
+- POST /api/auth/login
+- POST /api/auth/google
+- GET /api/auth/me
+
+Interviews:
+- GET /api/interviews
+- POST /api/interviews/start
+- GET /api/interviews/:id
+- POST /api/interviews/:id/answer
+- POST /api/interviews/:id/complete
+- POST /api/interviews/:id/abandon
+
+Questions:
+- GET /api/questions/categories
+- GET /api/questions
+- GET /api/questions/:id
+
+Users:
+- GET /api/users/profile
+- PUT /api/users/profile
+- PUT /api/users/password
+- DELETE /api/users/account
+
+Other:
+- GET /api/analytics
+- GET /api/leaderboard
+- GET /api/health
+
+7) Authentication and Session Behavior
+- JWT-based auth for protected routes
+- Token set in client storage and attached on API requests
+- 401 responses trigger logout/redirect flow on client
+- Google OAuth path verifies token server-side before user creation/login
+
+8) Interview and Scoring Logic
+- Question count controlled by user (validated range)
+- AI-generated and DB-backed fallback questions
+- Per-question scoring in 0-10 range
+- Interview percentage and grade computed from aggregate score
+- Final completion updates persistent user stats (average/best/category scores)
+
+9) Media and Accessibility Behavior
+- Camera/microphone permission requested pre-session
+- Live camera shown during interview where applicable
+- Speech-to-text input available where browser supports Web Speech API
+- Graceful fallback to text-only when media/speech unavailable
+
+10) Security and Reliability
+- Helmet security headers
+- Express Mongo sanitize for payload hardening
+- CORS origin restrictions via CLIENT_URL
+- API-wide rate limiting
+- Joi validation and centralized error shaping
+- AI fallback behavior when key is missing or model fails
+
+11) Environment Variables Used
+Server-side:
+- NODE_ENV
+- PORT
+- MONGODB_URI
+- JWT_SECRET
+- JWT_EXPIRES_IN
+- GOOGLE_AI_API_KEY
+- GOOGLE_AI_MODEL
+- GOOGLE_AI_MODELS
+- GOOGLE_CLIENT_ID
+- CLIENT_URL
+- RATE_LIMIT_WINDOW_MS
+- RATE_LIMIT_MAX
+
+Client-side (Vite):
+- VITE_GOOGLE_CLIENT_ID
+- VITE_API_BASE_URL (if configured)
+
+12) Packages by App
+Root devDependencies:
+- concurrently
+
+Client dependencies:
+- react, react-dom, react-router-dom
+- axios
+- @react-oauth/google
+- framer-motion
+- lucide-react
+- react-hot-toast
+- recharts
+
+Client devDependencies:
+- vite, @vitejs/plugin-react
+- tailwindcss, postcss, autoprefixer
+- eslint, eslint-plugin-react, eslint-plugin-react-hooks
+
+Server dependencies:
+- express, mongoose, dotenv
+- jsonwebtoken, bcryptjs
+- cors, helmet, morgan
+- express-rate-limit, express-mongo-sanitize, xss-clean
+- joi
+- @google/generative-ai
+- google-auth-library
+
+Server devDependencies:
+- nodemon
+- eslint
+
+13) Typical Run Commands
+- npm run install:all
+- npm run seed
+- npm run dev
+
+Access:
+- Frontend (default): http://localhost:5173
+- Backend API (default): http://localhost:5000/api
+
+14) Important Edge Cases Implemented
+- Prevents multiple concurrent in-progress interviews per user
+- Attempts to fill interview with exact question count; retries and DB fallback
+- AI model rotation with fallback models
+- Deterministic question/evaluation fallback when AI is unavailable
+- Handles unsupported speech recognition and missing camera gracefully
+- Auto-completion logic when interview timing ends
+
+15) Notes
+- This document was generated from current project code and configuration.
+- For direct code references, see files under client/src and server/ as listed above.

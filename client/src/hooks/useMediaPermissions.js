@@ -1,5 +1,5 @@
-import { useState, useRef, useCallback } from 'react';
-import toast from 'react-hot-toast';
+import { useState, useRef, useCallback } from "react";
+import toast from "react-hot-toast";
 
 export const useMediaPermissions = () => {
   const [mediaStream, setMediaStream] = useState(null);
@@ -14,24 +14,31 @@ export const useMediaPermissions = () => {
     setLoading(true);
     setError(null);
     try {
-      // Request both video and audio
+      // Request both video and audio with optimized audio constraints
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 320 }, height: { ideal: 240 } },
-        audio: true,
+        audio: {
+          echoCancellation: true, // removes speaker echo from mic
+          noiseSuppression: true, // removes background hum/noise
+          autoGainControl: true, // normalizes volume automatically
+          sampleRate: 16000, // optimal for speech recognition
+          channelCount: 1, // mono is best for STT
+        },
       });
 
       setMediaStream(stream);
       setAudioStream(stream);
       setPermissionsGranted(true);
-      toast.success('Camera and microphone access granted');
+      toast.success("Camera and microphone access granted");
       return stream;
     } catch (err) {
-      const errorMsg = err.name === 'NotAllowedError'
-        ? 'Camera and microphone access denied'
-        : err.name === 'NotFoundError'
-        ? 'No camera or microphone found'
-        : 'Failed to access camera/microphone';
-      
+      const errorMsg =
+        err.name === "NotAllowedError"
+          ? "Camera and microphone access denied"
+          : err.name === "NotFoundError"
+            ? "No camera or microphone found"
+            : "Failed to access camera/microphone";
+
       setError(errorMsg);
       toast.error(errorMsg);
       return null;
@@ -72,7 +79,7 @@ export const useMediaPermissions = () => {
 
       mediaRecorderRef.current.onstop = () => {
         const blob = new Blob(recordedChunksRef.current, {
-          type: 'audio/webm',
+          type: "audio/webm",
         });
         resolve(blob);
       };

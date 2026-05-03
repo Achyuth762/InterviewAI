@@ -52,6 +52,11 @@ export const interviewAPI = {
   abandon: (id) => api.post(`/interviews/${id}/abandon`),
   getById: (id) => api.get(`/interviews/${id}`),
   getAll: (params) => api.get("/interviews", { params }),
+  correctTranscript: (rawTranscript, questionContext) =>
+    api.post("/interviews/correct-transcript", {
+      transcript: rawTranscript,
+      context: questionContext,
+    }),
 };
 
 // Questions
