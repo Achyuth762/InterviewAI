@@ -4,7 +4,6 @@ const Groq = require("groq-sdk");
 const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 const DEFAULT_GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
 const DISABLED_GEMINI_MODELS = new Set([
-  // Avoid known-invalid/retired model ids for current generateContent usage.
   "gemini-2.0-flash",
   "gemini-1.5-flash",
 ]);
@@ -31,7 +30,6 @@ const getGeminiModelNames = () => {
       .filter(Boolean),
   );
 
-  // Priority: explicit list -> single model -> sensible defaults.
   const ordered = unique([
     ...configuredList,
     ...sanitizeGeminiModelList([single]),
