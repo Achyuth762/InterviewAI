@@ -10,24 +10,6 @@ const {
 const normalizeQuestionText = (text = "") =>
   String(text).replace(/\s+/g, " ").trim().toLowerCase();
 
-const normalizeBranch = (value) =>
-  String(value || "")
-    .trim()
-    .toLowerCase();
-
-const buildBranchQuery = (branch) => {
-  if (!branch) return {};
-  return {
-    $or: [
-      { branch },
-      { branch: "general" },
-      { branch: { $exists: false } },
-      { branch: "" },
-      { branch: null },
-    ],
-  };
-};
-
 const uniqueQuestionsByText = (items = [], blockedSet = new Set()) => {
   const seen = new Set(blockedSet);
   return items.filter((q) => {
@@ -42,40 +24,9 @@ const uniqueQuestionsByText = (items = [], blockedSet = new Set()) => {
 // @route   POST /api/interviews/start
 const startInterview = async (req, res, next) => {
   try {
-    const {
-      category,
-      subcategory,
-      difficulty,
-      questionCount,
-      roundType,
-      branch,
-    } = req.body;
+    const { category, subcategory, difficulty, questionCount, roundType } =
+      req.body;
     const userId = req.user._id;
-    const normalizedBranch = normalizeBranch(branch);
-    const effectiveBranch = normalizedBranch || "general";
-
-    if (!normalizedBranch) {
-      return res.status(400).json({
-        message: "Please select your branch before starting the interview.",
-      });
-    }
-
-    const eligibleBranches = new Set([
-      "cs",
-      "it",
-      "software",
-      "computer-engineering",
-      "ai-ml",
-      "data-science",
-      "cybersecurity",
-      "information-systems",
-    ]);
-
-    if (!eligibleBranches.has(normalizedBranch)) {
-      return res.status(403).json({
-        message: "Only computer science related branches can take mock interviews.",
-      });
-    }
 
     // Infer roundType from category if not provided
     const effectiveRoundType =
@@ -107,16 +58,12 @@ const startInterview = async (req, res, next) => {
     const profileContext = req.user.profile
       ? `Experience: ${req.user.profile.experience}, Skills: ${(req.user.profile.skills || []).join(", ")}, Target Role: ${req.user.profile.targetRole}`
       : "";
-    const branchContext = normalizedBranch ? `Branch: ${normalizedBranch}` : "";
-    const userContext = [profileContext, branchContext]
-      .filter(Boolean)
-      .join(" | ");
+    const userContext = profileContext ? profileContext : "";
 
     // Prevent repeating questions across previous interviews for this user.
     const previousInterviews = await Interview.find({
       user: userId,
       category,
-      ...(normalizedBranch ? { branch: normalizedBranch } : {}),
     }).select("answers.question answers.questionText");
 
     const usedQuestionIds = new Set();
@@ -194,10 +141,7 @@ const startInterview = async (req, res, next) => {
 
     // Final top-up from existing DB questions to avoid short sessions.
     if (questions.length < totalCount) {
-      const existingPoolQuery = {
-        category,
-        ...buildBranchQuery(normalizedBranch),
-      };
+      const existingPoolQuery = { category };
 
       if (usedQuestionIds.size > 0) {
         existingPoolQuery._id = { $nin: Array.from(usedQuestionIds) };
@@ -244,13 +188,12 @@ const startInterview = async (req, res, next) => {
       if (q.isAIGenerated) {
         savedQ = await Question.create({
           ...q,
-          branch: effectiveBranch,
           usageCount: 1,
         });
       } else {
         savedQ = await Question.findOneAndUpdate(
-          { question: q.question, category, branch: effectiveBranch },
-          { ...q, branch: effectiveBranch, $inc: { usageCount: 1 } },
+          { question: q.question, category },
+          { ...q, $inc: { usageCount: 1 } },
           { upsert: true, new: true },
         );
       }
@@ -275,7 +218,6 @@ const startInterview = async (req, res, next) => {
     const interview = await Interview.create({
       user: userId,
       category,
-      branch: effectiveBranch,
       roundType: effectiveRoundType,
       subcategory: subcategory || "general",
       difficulty,
@@ -294,7 +236,6 @@ const startInterview = async (req, res, next) => {
       interview: {
         _id: interview._id,
         category: interview.category,
-        branch: interview.branch,
         roundType: interview.roundType,
         subcategory: interview.subcategory,
         difficulty: interview.difficulty,

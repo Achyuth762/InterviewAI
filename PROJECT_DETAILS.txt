@@ -1,11 +1,11 @@
 AI Mock Interview System - Technical Inventory
 
-Generated: March 29, 2026
+Generated: June 3, 2026
 
 1) Architecture Overview
 - Stack: MERN (MongoDB, Express, React, Node.js)
 - Frontend: React 18 + Vite + Tailwind CSS + Framer Motion + Recharts
-- Backend: Node.js + Express + MongoDB + Google Generative AI (Gemini)
+- Backend: Node.js + Express + MongoDB + Google Generative AI (Gemini) with Groq fallback
 - Auth: JWT + Google OAuth 2.0
 - Core flow: Authentication -> Interview Setup -> Media Permissions -> Interview Session -> AI Evaluation -> Results/Analytics
 
@@ -30,7 +30,7 @@ From package.json:
 4.1) Entry and App Wiring
 - client/src/main.jsx
   - Provider order: GoogleOAuthProvider -> BrowserRouter -> ThemeProvider -> MediaProvider -> AuthProvider -> App
-  - Toaster integrated globally
+  - Toaster integrated globally with 4s duration and custom styling
 - client/src/App.jsx
   - Public routes: /, /login, /register
   - Protected routes: /dashboard, /interview/setup, /media-permissions, /interview/:id, /interview/:id/result, /history, /analytics, /leaderboard, /profile, /settings
@@ -68,7 +68,7 @@ From package.json:
 - Landing.jsx: marketing/home with CTA
 - Login.jsx/Register.jsx: auth and Google sign-in
 - Dashboard.jsx: interview summary cards and quick actions
-- InterviewSetup.jsx: category, subcategory, difficulty, question count configuration
+- InterviewSetup.jsx: category, subcategory, difficulty, question count configuration (no branch selection)
 - MediaPermissions.jsx: pre-session camera/mic grant and preview
 - InterviewSession.jsx: live Q&A, speech-to-text input, timing, submit/skip
 - InterviewResult.jsx: score, grade, per-question feedback, recommendations
@@ -80,7 +80,7 @@ From package.json:
 
 4.6) API Service Layer
 - client/src/services/api.js
-  - Axios base URL: /api
+  - Axios base URL: VITE_API_BASE_URL or /api (trims trailing slash)
   - Request interceptor injects Authorization: Bearer <token>
   - Response interceptor handles 401 by clearing auth and redirecting to login
   - Groups: authAPI, interviewAPI, questionAPI, userAPI, analyticsAPI, leaderboardAPI
@@ -88,13 +88,13 @@ From package.json:
 5) Backend (server)
 5.1) Server Startup and Middleware
 - server/server.js
-  - Loads env
+  - Loads env from ../.env
   - Connects DB
   - Security middleware: helmet, mongo sanitize, cors, rate limiting
   - Parsers: express.json/urlencoded
   - Logging: morgan in dev
   - Mounts routes at /api/*
-  - Health endpoint: GET /api/health
+  - Health endpoint: GET /api/health (includes AI configured flag)
   - Not-found + centralized error handling middleware
 
 5.2) Database
@@ -194,7 +194,7 @@ From package.json:
 
 5.8) AI Service
 - server/services/aiService.js
-  - Integrates Google Generative AI
+  - Integrates Google Generative AI with Groq fallback
   - Model rotation/fallback among configured models
   - JSON parsing + normalization for AI responses
   - generateQuestions:
@@ -284,6 +284,9 @@ Server-side:
 - GOOGLE_AI_API_KEY
 - GOOGLE_AI_MODEL
 - GOOGLE_AI_MODELS
+- GROQ_API_KEY
+- GROQ_MODEL
+- GROQ_MODELS
 - GOOGLE_CLIENT_ID
 - CLIENT_URL
 - RATE_LIMIT_WINDOW_MS
@@ -318,6 +321,7 @@ Server dependencies:
 - express-rate-limit, express-mongo-sanitize, xss-clean
 - joi
 - @google/generative-ai
+- groq-sdk
 - google-auth-library
 
 Server devDependencies:
@@ -344,3 +348,4 @@ Access:
 15) Notes
 - This document was generated from current project code and configuration.
 - For direct code references, see files under client/src and server/ as listed above.
+- Branch/department selection has been removed from interview setup and APIs.

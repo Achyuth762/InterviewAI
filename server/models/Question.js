@@ -8,12 +8,6 @@ const questionSchema = new mongoose.Schema(
       enum: ["aptitude", "technical", "hr", "managerial"],
       index: true,
     },
-    branch: {
-      type: String,
-      trim: true,
-      index: true,
-      default: "general",
-    },
     subcategory: {
       type: String,
       required: true,
@@ -89,7 +83,7 @@ const questionSchema = new mongoose.Schema(
   },
 );
 
-questionSchema.index({ category: 1, branch: 1, subcategory: 1, difficulty: 1 });
+questionSchema.index({ category: 1, subcategory: 1, difficulty: 1 });
 questionSchema.index({ tags: 1 });
 
 module.exports = mongoose.model("Question", questionSchema);

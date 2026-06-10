@@ -9,7 +9,6 @@ const getQuestions = async (req, res, next) => {
       subcategory,
       difficulty,
       type,
-      branch,
       page = 1,
       limit = 20,
     } = req.query;
@@ -19,15 +18,6 @@ const getQuestions = async (req, res, next) => {
     if (subcategory) query.subcategory = subcategory;
     if (difficulty) query.difficulty = difficulty;
     if (type) query.type = type;
-    if (branch) {
-      query.$or = [
-        { branch },
-        { branch: "general" },
-        { branch: { $exists: false } },
-        { branch: "" },
-        { branch: null },
-      ];
-    }
 
     const total = await Question.countDocuments(query);
     const questions = await Question.find(query)
@@ -135,41 +125,8 @@ const getCategories = async (req, res, next) => {
       },
     ];
 
-    const branches = [
-      { id: "cs", name: "Computer Science" },
-      { id: "it", name: "IT" },
-      { id: "software", name: "Software Engineering" },
-      { id: "computer-engineering", name: "Computer Engineering" },
-      { id: "ai-ml", name: "AI and ML" },
-      { id: "data-science", name: "Data Science" },
-      { id: "cybersecurity", name: "Cybersecurity" },
-      { id: "information-systems", name: "Information Systems" },
-      { id: "mechanical", name: "Mechanical" },
-      { id: "eee", name: "EEE" },
-      { id: "ece", name: "ECE" },
-      { id: "civil", name: "Civil" },
-      { id: "chemical", name: "Chemical" },
-      { id: "aerospace", name: "Aerospace" },
-      { id: "biomedical", name: "Biomedical" },
-      { id: "industrial", name: "Industrial" },
-      { id: "automobile", name: "Automobile" },
-      { id: "petroleum", name: "Petroleum" },
-      { id: "metallurgy", name: "Metallurgy" },
-      { id: "mining", name: "Mining" },
-      { id: "production", name: "Production" },
-      { id: "environmental", name: "Environmental" },
-      { id: "agricultural", name: "Agricultural" },
-      { id: "instrumentation", name: "Instrumentation" },
-      { id: "mechatronics", name: "Mechatronics" },
-      { id: "robotics", name: "Robotics" },
-      { id: "textile", name: "Textile" },
-      { id: "naval", name: "Naval Architecture" },
-    ];
-
     res.json({
       categories,
-      branches,
-      branchRequiredFor: ["aptitude", "technical", "hr", "managerial"],
     });
   } catch (error) {
     next(error);

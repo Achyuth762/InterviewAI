@@ -161,6 +161,9 @@ const generateWithGroqModels = async (promptText, generationConfig) => {
             ? generationConfig.temperature
             : 0.7,
         max_tokens: toGroqMaxTokens(generationConfig),
+        ...(generationConfig?.responseFormat
+          ? { response_format: generationConfig.responseFormat }
+          : {}),
       });
 
       const content = completion?.choices?.[0]?.message?.content;
@@ -237,21 +240,48 @@ const extractJsonCandidate = (text = "", expectedType = "object") => {
   return direct;
 };
 
+const sanitizeJsonCandidate = (text = "") =>
+  String(text)
+    .replace(/[\u0000-\u001F]/g, " ")
+    .replace(/,\s*([}\]])/g, "$1")
+    .trim();
+
+const unwrapJsonPayload = (parsed, expectedType) => {
+  if (expectedType === "array") {
+    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed?.items)) return parsed.items;
+    if (Array.isArray(parsed?.questions)) return parsed.questions;
+    return parsed;
+  }
+  return parsed;
+};
+
 const parseAIJsonResponse = (content, expectedType = "object") => {
   const candidate = extractJsonCandidate(content, expectedType);
   if (!candidate) {
     throw new Error("AI returned empty content.");
   }
 
-  const parsed = JSON.parse(candidate);
-  if (expectedType === "array" && !Array.isArray(parsed)) {
+  let parsed;
+  try {
+    parsed = JSON.parse(candidate);
+  } catch (error) {
+    const cleaned = sanitizeJsonCandidate(candidate);
+    parsed = JSON.parse(cleaned);
+  }
+
+  const unwrapped = unwrapJsonPayload(parsed, expectedType);
+  if (expectedType === "array" && !Array.isArray(unwrapped)) {
     throw new Error("AI response is not a JSON array.");
   }
-  if (expectedType === "object" && (Array.isArray(parsed) || parsed === null)) {
+  if (
+    expectedType === "object" &&
+    (Array.isArray(unwrapped) || unwrapped === null)
+  ) {
     throw new Error("AI response is not a JSON object.");
   }
 
-  return parsed;
+  return unwrapped;
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -728,7 +758,11 @@ Return ONLY the JSON array, no markdown or other text.`;
 
     const content = await generateWithAI(
       `${categoryConfig.system}\n\n${prompt}`,
-      { temperature: 0.8, maxOutputTokens: 4000 },
+      {
+        temperature: 0.8,
+        maxOutputTokens: 4000,
+        responseMimeType: "application/json",
+      },
     );
     if (!content) {
       return generateFallbackQuestions(
@@ -924,6 +958,8 @@ const evaluateAnswer = async (
       const content = await generateWithAI(systemPrompt + "\n\n" + prompt, {
         temperature: 0.3,
         maxOutputTokens: 1500,
+        responseMimeType: "application/json",
+        responseFormat: { type: "json_object" },
       });
       const parsed = parseAIJsonResponse(content, "object");
       return normalizeEvaluationResult(parsed, question, userAnswer, roundType);
@@ -1043,6 +1079,8 @@ Return ONLY valid JSON, no markdown.`;
     const content = await generateWithAI(systemPrompt + "\n\n" + prompt, {
       temperature: 0.5,
       maxOutputTokens: 1500,
+      responseMimeType: "application/json",
+      responseFormat: { type: "json_object" },
     });
 
     if (!content) return generateFallbackFeedback(interview);

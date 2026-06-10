@@ -51,38 +51,6 @@ const startInterviewSchema = Joi.object({
     .valid("aptitude", "technical", "hr", "managerial")
     .required(),
   subcategory: Joi.string().trim().max(200).default("general"),
-  branch: Joi.string()
-    .valid(
-      "cs",
-      "it",
-      "software",
-      "computer-engineering",
-      "ai-ml",
-      "data-science",
-      "cybersecurity",
-      "information-systems",
-      "mechanical",
-      "eee",
-      "ece",
-      "civil",
-      "chemical",
-      "aerospace",
-      "biomedical",
-      "industrial",
-      "automobile",
-      "petroleum",
-      "metallurgy",
-      "mining",
-      "production",
-      "environmental",
-      "agricultural",
-      "instrumentation",
-      "mechatronics",
-      "robotics",
-      "textile",
-      "naval",
-    )
-    .required(),
   difficulty: Joi.string()
     .valid("easy", "medium", "hard", "adaptive")
     .default("medium"),

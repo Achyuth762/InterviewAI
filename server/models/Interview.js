@@ -87,11 +87,6 @@ const interviewSchema = new mongoose.Schema(
       required: true,
       enum: ["aptitude", "technical", "hr", "managerial"],
     },
-    branch: {
-      type: String,
-      default: "general",
-      index: true,
-    },
     roundType: {
       type: String,
       enum: ["technical", "managerial", "hr"],
