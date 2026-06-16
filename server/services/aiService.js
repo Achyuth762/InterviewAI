@@ -1,83 +1,81 @@
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-const Groq = require("groq-sdk");
+const axios = require("axios");
 
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
-const DEFAULT_GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
-const DISABLED_GEMINI_MODELS = new Set([
-  "gemini-2.0-flash",
-  "gemini-1.5-flash",
-]);
+const DEFAULT_NVIDIA_MODEL = "meta/llama-3.1-405b-instruct";
+const DEFAULT_NVIDIA_MODELS = ["meta/llama-3.1-405b-instruct", "mistralai/mistral-large"];
 
 let modelRotationIndex = 0;
-let groqModelRotationIndex = 0;
+let fallbackModelRotationIndex = 0;
 
-const getGeminiModelName = () => {
-  const configured = (process.env.GOOGLE_AI_MODEL || "").trim();
-  return configured || DEFAULT_GEMINI_MODEL;
+const getNvidiaModelName = () => {
+  const configured = (process.env.NVIDIA_AI_MODEL || "").trim();
+  return configured || DEFAULT_NVIDIA_MODEL;
 };
 
 const unique = (arr = []) => [...new Set(arr)];
 
-const sanitizeGeminiModelList = (names = []) =>
-  names.filter((name) => name && !DISABLED_GEMINI_MODELS.has(name));
-
-const getGeminiModelNames = () => {
-  const single = getGeminiModelName();
-  const configuredList = sanitizeGeminiModelList(
-    String(process.env.GOOGLE_AI_MODELS || "")
-      .split(",")
-      .map((m) => m.trim())
-      .filter(Boolean),
-  );
-
-  const ordered = unique([
-    ...configuredList,
-    ...sanitizeGeminiModelList([single]),
-    ...sanitizeGeminiModelList(DEFAULT_GEMINI_MODELS),
-  ]);
-
-  return ordered.length ? ordered : [...DEFAULT_GEMINI_MODELS];
-};
-
-const getGeminiClient = () => {
-  if (!process.env.GOOGLE_AI_API_KEY) {
-    return null;
-  }
-  return new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY);
-};
-
-const DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant";
-const DEFAULT_GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
-
-const getGroqModelName = () => {
-  const configured = (process.env.GROQ_MODEL || "").trim();
-  return configured || DEFAULT_GROQ_MODEL;
-};
-
-const getGroqModelNames = () => {
-  const single = getGroqModelName();
-  const configuredList = String(process.env.GROQ_MODELS || "")
+const getNvidiaModelNames = () => {
+  const single = getNvidiaModelName();
+  const configuredList = String(process.env.NVIDIA_AI_MODELS || "")
     .split(",")
     .map((m) => m.trim())
     .filter(Boolean);
 
-  const ordered = unique([...configuredList, single, ...DEFAULT_GROQ_MODELS]);
-  return ordered.length ? ordered : [...DEFAULT_GROQ_MODELS];
+  const ordered = unique([
+    ...configuredList,
+    single,
+    ...DEFAULT_NVIDIA_MODELS,
+  ]);
+
+  return ordered.length ? ordered : [...DEFAULT_NVIDIA_MODELS];
 };
 
-const getGroqClient = () => {
-  if (!process.env.GROQ_API_KEY) {
+const getNvidiaClient = () => {
+  if (!process.env.NVIDIA_API_KEY) {
     return null;
   }
-  return new Groq({ apiKey: process.env.GROQ_API_KEY });
+  return axios.create({
+    baseURL: process.env.NVIDIA_API_BASE_URL || "https://integrate.api.nvidia.com/v1",
+    headers: {
+      "Authorization": `Bearer ${process.env.NVIDIA_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+  });
 };
 
-const hasGeminiApiKey = () =>
-  Boolean((process.env.GOOGLE_AI_API_KEY || "").trim());
+// Fallback provider (Groq)
+const DEFAULT_FALLBACK_MODEL = "llama-3.1-8b-instant";
+const DEFAULT_FALLBACK_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
 
-const hasGroqApiKey = () => Boolean((process.env.GROQ_API_KEY || "").trim());
+const getFallbackModelName = () => {
+  const configured = (process.env.FALLBACK_AI_MODEL || "").trim();
+  return configured || DEFAULT_FALLBACK_MODEL;
+};
 
-const hasAnyAIProviderKey = () => hasGeminiApiKey() || hasGroqApiKey();
+const getFallbackModelNames = () => {
+  const single = getFallbackModelName();
+  const configuredList = String(process.env.FALLBACK_AI_MODELS || "")
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
+
+  const ordered = unique([...configuredList, single, ...DEFAULT_FALLBACK_MODELS]);
+  return ordered.length ? ordered : [...DEFAULT_FALLBACK_MODELS];
+};
+
+const getFallbackClient = () => {
+  if (!process.env.FALLBACK_API_KEY) {
+    return null;
+  }
+  const Groq = require("groq-sdk");
+  return new Groq({ apiKey: process.env.FALLBACK_API_KEY });
+};
+
+const hasNvidiaApiKey = () =>
+  Boolean((process.env.NVIDIA_API_KEY || "").trim());
+
+const hasFallbackApiKey = () => Boolean((process.env.FALLBACK_API_KEY || "").trim());
+
+const hasAnyAIProviderKey = () => hasNvidiaApiKey() || hasFallbackApiKey();
 
 const getRotatedModelOrder = (names) => {
   if (!names.length) return [];
@@ -86,69 +84,62 @@ const getRotatedModelOrder = (names) => {
   return [...names.slice(start), ...names.slice(0, start)];
 };
 
-const getGroqRotatedModelOrder = (names) => {
+const getFallbackRotatedModelOrder = (names) => {
   if (!names.length) return [];
-  const start = groqModelRotationIndex % names.length;
-  groqModelRotationIndex = (groqModelRotationIndex + 1) % names.length;
+  const start = fallbackModelRotationIndex % names.length;
+  fallbackModelRotationIndex = (fallbackModelRotationIndex + 1) % names.length;
   return [...names.slice(start), ...names.slice(0, start)];
 };
 
-const generateWithGeminiModels = async (promptText, generationConfig) => {
-  const client = getGeminiClient();
+const generateWithNvidiaModels = async (promptText, generationConfig) => {
+  const client = getNvidiaClient();
   if (!client) {
     return null;
   }
 
-  const modelNames = getGeminiModelNames();
+  const modelNames = getNvidiaModelNames();
   const orderedModels = getRotatedModelOrder(modelNames);
   let lastError;
 
   for (const modelName of orderedModels) {
     try {
-      const model = client.getGenerativeModel({ model: modelName });
-      const response = await model.generateContent({
-        contents: [
+      const response = await client.post("/chat/completions", {
+        model: modelName,
+        messages: [
           {
             role: "user",
-            parts: [{ text: promptText }],
+            content: promptText,
           },
         ],
-        generationConfig,
+        temperature: generationConfig?.temperature || 0.7,
+        max_tokens: generationConfig?.maxOutputTokens || 2048,
+        top_p: 0.9,
       });
-      return response.response.text().trim();
+
+      const content = response?.data?.choices?.[0]?.message?.content;
+      if (!content || !String(content).trim()) {
+        throw new Error("NVIDIA NIM returned empty content.");
+      }
+      return String(content).trim();
     } catch (error) {
       lastError = error;
-      console.error(`Gemini model ${modelName} failed:`, error.message);
+      console.error(`NVIDIA NIM model ${modelName} failed:`, error.message);
     }
   }
 
   throw createAIUnavailableError(
-    `All configured Gemini models failed. (${lastError?.message || "unknown error"})`,
+    `All configured NVIDIA NIM models failed. (${lastError?.message || "unknown error"})`,
   );
 };
 
-const mapToGroqModel = (modelName) => {
-  if (!modelName) return DEFAULT_GROQ_MODEL;
-  if (!modelName.includes("gemini")) return modelName;
-
-  // If env accidentally points to Gemini for Groq, fall back safely.
-  return DEFAULT_GROQ_MODEL;
-};
-
-const toGroqMaxTokens = (generationConfig = {}) => {
-  const v = Number(generationConfig?.maxOutputTokens);
-  if (!Number.isFinite(v) || v <= 0) return undefined;
-  return Math.max(256, Math.min(4000, Math.round(v)));
-};
-
-const generateWithGroqModels = async (promptText, generationConfig) => {
-  const client = getGroqClient();
+const generateWithFallbackModels = async (promptText, generationConfig) => {
+  const client = getFallbackClient();
   if (!client) {
     return null;
   }
 
-  const modelNames = getGroqModelNames().map(mapToGroqModel);
-  const orderedModels = getGroqRotatedModelOrder(modelNames);
+  const modelNames = getFallbackModelNames();
+  const orderedModels = getFallbackRotatedModelOrder(modelNames);
   let lastError;
 
   for (const modelName of orderedModels) {
@@ -160,26 +151,29 @@ const generateWithGroqModels = async (promptText, generationConfig) => {
           typeof generationConfig?.temperature === "number"
             ? generationConfig.temperature
             : 0.7,
-        max_tokens: toGroqMaxTokens(generationConfig),
-        ...(generationConfig?.responseFormat
-          ? { response_format: generationConfig.responseFormat }
-          : {}),
+        max_tokens: toFallbackMaxTokens(generationConfig),
       });
 
       const content = completion?.choices?.[0]?.message?.content;
       if (!content || !String(content).trim()) {
-        throw new Error("Groq returned empty content.");
+        throw new Error("Fallback provider returned empty content.");
       }
       return String(content).trim();
     } catch (error) {
       lastError = error;
-      console.error(`Groq model ${modelName} failed:`, error.message);
+      console.error(`Fallback model ${modelName} failed:`, error.message);
     }
   }
 
   throw createAIUnavailableError(
-    `All configured Groq models failed. (${lastError?.message || "unknown error"})`,
+    `All configured fallback models failed. (${lastError?.message || "unknown error"})`,
   );
+};
+
+const toFallbackMaxTokens = (generationConfig = {}) => {
+  const v = Number(generationConfig?.maxOutputTokens);
+  if (!Number.isFinite(v) || v <= 0) return undefined;
+  return Math.max(256, Math.min(4000, Math.round(v)));
 };
 
 const generateWithAI = async (promptText, generationConfig = {}) => {
@@ -187,25 +181,25 @@ const generateWithAI = async (promptText, generationConfig = {}) => {
     return null;
   }
 
-  // Primary: Gemini
-  if (hasGeminiApiKey()) {
+  // Primary: NVIDIA NIM
+  if (hasNvidiaApiKey()) {
     try {
-      const geminiResponse = await generateWithGeminiModels(
+      const nvidiaResponse = await generateWithNvidiaModels(
         promptText,
         generationConfig,
       );
-      if (geminiResponse) return geminiResponse;
+      if (nvidiaResponse) return nvidiaResponse;
     } catch (error) {
       console.error(
-        "Gemini provider failed, trying Groq fallback:",
+        "NVIDIA NIM provider failed, trying fallback:",
         error.message,
       );
     }
   }
 
-  // Immediate fallback: Groq
-  if (hasGroqApiKey()) {
-    return generateWithGroqModels(promptText, generationConfig);
+  // Fallback: Groq
+  if (hasFallbackApiKey()) {
+    return generateWithFallbackModels(promptText, generationConfig);
   }
 
   return null;
@@ -545,6 +539,79 @@ const cleanFeedbackText = (text = "") =>
     .replace(/\s+([.,!?;:])/g, "$1")
     .trim();
 
+const normalizeAnswerToken = (value = "") =>
+  String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[.()\[\]{}:,;!?"'`]/g, "")
+    .replace(/^option\s+/i, "");
+
+const getOptionList = (question) =>
+  Array.isArray(question?.options) ? question.options : [];
+
+const resolveMcqAnswerMatch = (question, userAnswer) => {
+  const normalizedAnswer = normalizeAnswerToken(userAnswer);
+  const normalizedCorrect = normalizeAnswerToken(question?.correctAnswer);
+
+  if (!normalizedAnswer || !normalizedCorrect) {
+    return {
+      isCorrect: false,
+      correctAnswerText: question?.correctAnswer || "",
+    };
+  }
+
+  const options = getOptionList(question);
+  const matchedAnsweredOption = options.find((option) => {
+    const label = normalizeAnswerToken(option?.label);
+    const text = normalizeAnswerToken(option?.text);
+    return normalizedAnswer === label || normalizedAnswer === text;
+  });
+
+  const matchedCorrectOption = options.find((option) => {
+    const label = normalizeAnswerToken(option?.label);
+    const text = normalizeAnswerToken(option?.text);
+    return normalizedCorrect === label || normalizedCorrect === text;
+  });
+
+  if (normalizedAnswer === normalizedCorrect) {
+    return {
+      isCorrect: true,
+      correctAnswerText: question?.correctAnswer || "",
+    };
+  }
+
+  if (matchedAnsweredOption && matchedCorrectOption) {
+    const sameOption =
+      normalizeAnswerToken(matchedAnsweredOption.label) ===
+        normalizeAnswerToken(matchedCorrectOption.label) ||
+      normalizeAnswerToken(matchedAnsweredOption.text) ===
+        normalizeAnswerToken(matchedCorrectOption.text);
+
+    return {
+      isCorrect: sameOption,
+      correctAnswerText:
+        matchedCorrectOption.label ||
+        matchedCorrectOption.text ||
+        question?.correctAnswer ||
+        "",
+    };
+  }
+
+  if (matchedAnsweredOption && !matchedCorrectOption) {
+    return {
+      isCorrect:
+        normalizedAnswer === normalizedCorrect ||
+        normalizeAnswerToken(matchedAnsweredOption.label) ===
+          normalizedCorrect ||
+        normalizeAnswerToken(matchedAnsweredOption.text) === normalizedCorrect,
+      correctAnswerText: question?.correctAnswer || "",
+    };
+  }
+
+  return { isCorrect: false, correctAnswerText: question?.correctAnswer || "" };
+};
+
 const INTERNAL_IMPROVEMENT_NOTES = new Set([
   "AI evaluator was unavailable, so fallback scoring was used.",
   "AI response parsing failed repeatedly, so fallback scoring was used.",
@@ -558,6 +625,7 @@ const normalizeEvaluationResult = (
 ) => {
   const fallback = generateFallbackEvaluation(question, userAnswer);
   const isMCQ = question?.type === "mcq";
+  const mcqMatch = isMCQ ? resolveMcqAnswerMatch(question, userAnswer) : null;
   const scoreValue = Number(result?.score);
   const score = Number.isFinite(scoreValue)
     ? Math.max(0, Math.min(10, Math.round(scoreValue)))
@@ -573,6 +641,25 @@ const normalizeEvaluationResult = (
     feedback = fallback.feedback;
   } else if (isGenericFeedback(feedback) || !hasReasonedExplanation(feedback)) {
     feedback = buildExplainableFeedback(question, userAnswer, score, feedback);
+  }
+
+  if (isMCQ) {
+    const correctAnswerText =
+      mcqMatch?.correctAnswerText || question?.correctAnswer || "";
+    const resolvedIsCorrect = mcqMatch?.isCorrect ?? fallback.isCorrect;
+
+    return {
+      ...fallback,
+      score: resolvedIsCorrect ? 10 : 0,
+      isCorrect: resolvedIsCorrect,
+      feedback: resolvedIsCorrect
+        ? "Correct! Well done."
+        : `Incorrect. The correct answer is ${correctAnswerText}. ${question?.sampleAnswer || ""}`,
+      strengths: resolvedIsCorrect ? ["Correct answer selected"] : [],
+      improvements: resolvedIsCorrect
+        ? []
+        : ["Review the concept behind this question"],
+    };
   }
 
   feedback = cleanFeedbackText(feedback);
@@ -746,7 +833,7 @@ Return a JSON array with this exact structure for each question:
   "question": "The question text",
   "type": "${category === "aptitude" ? "mcq" : "open-ended"}",
   "options": ${category === "aptitude" ? '[{"label": "A", "text": "option text"}, {"label": "B", "text": "option text"}, {"label": "C", "text": "option text"}, {"label": "D", "text": "option text"}]' : "[]"},
-  "correctAnswer": "The correct answer or model answer",
+  "correctAnswer": "${category === "aptitude" ? "The correct option label, such as A, B, C, or D" : "The correct answer or model answer"}",
   "sampleAnswer": "A detailed sample answer showing what a good response looks like",
   "evaluationCriteria": ["criterion 1", "criterion 2", "criterion 3"],
   "hints": ["helpful hint 1"],
@@ -1740,15 +1827,14 @@ function generateFallbackEvaluation(question, userAnswer) {
 
   // Basic scoring for MCQ
   if (question.type === "mcq" && question.correctAnswer) {
-    const isCorrect =
-      userAnswer.trim().toUpperCase() ===
-      question.correctAnswer.trim().toUpperCase();
+    const match = resolveMcqAnswerMatch(question, userAnswer);
+    const isCorrect = match.isCorrect;
     return {
       score: isCorrect ? 10 : 0,
       isCorrect,
       feedback: isCorrect
         ? "Correct! Well done."
-        : `Incorrect. The correct answer is ${question.correctAnswer}. ${question.sampleAnswer || ""}`,
+        : `Incorrect. The correct answer is ${match.correctAnswerText || question.correctAnswer}. ${question.sampleAnswer || ""}`,
       strengths: isCorrect ? ["Correct answer selected"] : [],
       improvements: isCorrect
         ? []

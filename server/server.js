@@ -67,9 +67,14 @@ app.get("/api/health", (req, res) => {
     timestamp: new Date().toISOString(),
     ai: {
       configured: Boolean(
-        (process.env.GOOGLE_AI_API_KEY || "").trim() ||
-        (process.env.GROQ_API_KEY || "").trim(),
+        (process.env.NVIDIA_API_KEY || "").trim() ||
+        (process.env.FALLBACK_API_KEY || "").trim(),
       ),
+      provider: (process.env.NVIDIA_API_KEY || "").trim() 
+        ? "NVIDIA NIM" 
+        : (process.env.FALLBACK_API_KEY || "").trim()
+          ? "Fallback (Groq)"
+          : "None",
     },
   });
 });
